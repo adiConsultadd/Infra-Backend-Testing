@@ -53,13 +53,24 @@ phases:
 
   post_build:
     commands:
-      - echo "--- Deploying Lambda Layers ---"
+      - echo "--- Deploying Lambda Layers via S3 ---"
       - |
         declare -A layer_arns
+        LAYERS_S3_BUCKET="blackbox-$TF_WORKSPACE-lambda-layers"
         for layer in common google openai; do
           TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
-          echo "Publishing new version for layer: $TF_LAYER_NAME"
-          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" --description "Auto-deployed by CodePipeline" --zip-file "fileb://build/layer-$layer.zip" --query 'LayerVersionArn' --output text)
+          S3_KEY="layer-zips/${layer}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
+          ZIP_FILE="build/layer-${layer}.zip"
+          
+          echo "Uploading layer $layer to s3://$LAYERS_S3_BUCKET/$S3_KEY"
+          aws s3 cp "$ZIP_FILE" "s3://$LAYERS_S3_BUCKET/$S3_KEY"
+
+          echo "Publishing new version for layer: $TF_LAYER_NAME from S3"
+          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" \
+            --description "Auto-deployed by CodePipeline" \
+            --content "S3Bucket=$LAYERS_S3_BUCKET,S3Key=$S3_KEY" \
+            --query 'LayerVersionArn' --output text)
+          
           if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
             echo "ERROR: Failed to publish layer $layer. Halting deployment."
             exit 1
