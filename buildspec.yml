@@ -10,9 +10,7 @@ phases:
 
   build:
     commands:
-      # --- 1. Package Lambda Layers ---
-      - echo "Starting Lambda Layer packaging..."
-      - mkdir -p build/layers
+      - echo "--- Packaging Lambda Layers ---"
       - |
         for layer in common google openai; do
           echo "Packaging layer: $layer"
@@ -20,67 +18,48 @@ phases:
           pip install -r "layers/$layer/requirements.txt" -t "build/layers/$layer/python"
           (cd "build/layers/$layer" && zip -rq "../../layer-$layer.zip" .)
         done
-      - echo "Layer packaging complete."
-
-      # --- 2. Package Lambda Functions ---
-      - echo "Starting Lambda Function packaging..."
-      - mkdir -p build/functions
+      - echo "--- Packaging Lambda Functions ---"
       - |
         declare -A service_map
         service_map["sourcing"]="sourcing"
         service_map["proposal_drafting"]="drafting"
         service_map["cost"]="costing"
-
         for service_dir in "${!service_map[@]}"; do
           tf_service_name=${service_map[$service_dir]}
-          echo "Packaging service: $service_dir -> $tf_service_name"
-          
+          echo "Packaging service: $service_dir"
           shared_files=$(find "$service_dir" -maxdepth 1 -type f -name "*.py")
-
           for lambda_file in $service_dir/lambda/*.py; do
             if [[ -f "$lambda_file" && ! "$lambda_file" == *"__init__.py"* ]]; then
               base_name=$(basename "$lambda_file" .py)
-              
               key_part=$(echo "$base_name" | sed 's/blackbox_//' | sed 's/_lambda//' | sed 's/blackbpx/blackbox/' | sed 's/_/-/g')
-              
               if [[ "$tf_service_name" == "sourcing" ]]; then
                 function_suffix=$(echo "$key_part" | sed 's/sourcing-//')
                 function_suffix="sourcing-$function_suffix"
               else
                 function_suffix="$tf_service_name-$key_part"
               fi
-
-              echo "  Preparing package for: $function_suffix from $lambda_file"
-              
+              echo "  Preparing package for: $function_suffix"
               temp_package_dir="build/functions/pkg_${function_suffix}"
               mkdir -p "$temp_package_dir"
-
               cp "$lambda_file" "$temp_package_dir/index.py"
-              
               if [ -n "$shared_files" ]; then
                 cp $shared_files "$temp_package_dir/"
               fi
-
               (cd "$temp_package_dir" && zip -rq "../${function_suffix}.zip" .)
-              
               rm -rf "$temp_package_dir"
             fi
           done
         done
-      - echo "Function packaging complete."
 
   post_build:
     commands:
-      # --- 3. Deploy Layers and Store New ARNs ---
-      - echo "Deploying Lambda Layers..."
+      - echo "--- Deploying Lambda Layers ---"
       - |
         declare -A layer_arns
         for layer in common google openai; do
           TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
           echo "Publishing new version for layer: $TF_LAYER_NAME"
-          
           NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" --description "Auto-deployed by CodePipeline" --zip-file "fileb://build/layer-$layer.zip" --query 'LayerVersionArn' --output text)
-          
           if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
             echo "ERROR: Failed to publish layer $layer. Halting deployment."
             exit 1
@@ -88,9 +67,7 @@ phases:
           echo "  Published $layer as $NEW_LAYER_VERSION_ARN"
           layer_arns[$layer]=$NEW_LAYER_VERSION_ARN
         done
-
-      # --- 4. Discover Lambda Functions via Tags ---
-      - echo "Discovering Lambda functions for Project: blackbox, Environment: $TF_WORKSPACE"
+      - echo "--- Discovering Lambda Functions via Tags ---"
       - |
         FUNCTION_LIST_JSON=$(aws resourcegroupstaggingapi get-resources --resource-type-filters "lambda:function" --tag-filters "Key=Project,Values=blackbox" "Key=Environment,Values=$TF_WORKSPACE")
         if [ -z "$FUNCTION_LIST_JSON" ]; then
@@ -98,36 +75,25 @@ phases:
           exit 1
         fi
         echo "  Successfully discovered functions to update."
-
-      # --- 5. Upload to S3 and Deploy Functions ---
-      - echo "Uploading artifacts and deploying Lambda Functions..."
+      - echo "--- Uploading and Deploying Functions ---"
       - |
         declare -A service_layers
         service_layers["sourcing"]="${layer_arns[common]}"
         service_layers["drafting"]="${layer_arns[common]},${layer_arns[google]},${layer_arns[openai]}"
         service_layers["costing"]="${layer_arns[common]},${layer_arns[google]},${layer_arns[openai]}"
-
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
-        
         for zip_file in build/functions/*.zip; do
             zip_name=$(basename "$zip_file" .zip)
             s3_key="lambda-code/${zip_name}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
-            
             FUNCTION_ARN=$(echo $FUNCTION_LIST_JSON | jq -r --arg name "$zip_name" '.ResourceTagMappingList[] | select(.ResourceARN | endswith($name)) | .ResourceARN')
-            
             if [ -z "$FUNCTION_ARN" ]; then
               echo "WARNING: Could not find a deployed Lambda for $zip_name. Skipping."
               continue
             fi
-
             echo "Uploading $zip_file to s3://$S3_ARTIFACT_BUCKET/$s3_key"
             aws s3 cp "$zip_file" "s3://$S3_ARTIFACT_BUCKET/$s3_key"
-
             echo "Updating code for function: $FUNCTION_ARN"
-            aws lambda update-function-code --function-name "$FUNCTION_ARN" \
-              --s3-bucket "$S3_ARTIFACT_BUCKET" \
-              --s3-key "$s3_key" > /dev/null
-
+            aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" > /dev/null
             service_name=$(echo $zip_name | cut -d'-' -f1)
             LAYERS_TO_ATTACH=${service_layers[$service_name]}
             if [ -n "$LAYERS_TO_ATTACH" ]; then
@@ -136,4 +102,4 @@ phases:
                 aws lambda update-function-configuration --function-name "$FUNCTION_ARN" --layers $LAYERS_TO_ATTACH > /dev/null
             fi
         done
-      - echo "Deployment complete."
+      - echo "--- Deployment Complete ---"
