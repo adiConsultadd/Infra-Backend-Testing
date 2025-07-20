@@ -10,16 +10,12 @@ phases:
 
   build:
     commands:
-      - echo "--- Packaging Lambda Layers ---"
-      - |
-        for layer in common google openai; do
-          echo "Packaging layer: $layer"
-          mkdir -p "build/layers/$layer/python"
-          pip install -r "layers/$layer/requirements.txt" -t "build/layers/$layer/python"
-          (cd "build/layers/$layer" && zip -rq "../../layer-$layer.zip" .)
-        done
+      # REMOVED: The section for packaging Lambda Layers has been completely removed.
+      # Terraform is now responsible for building and publishing layers.
+
       - echo "--- Packaging Lambda Functions ---"
       - |
+        # This logic remains the same, as its job is to package your Python code.
         declare -A service_map
         service_map["sourcing"]="sourcing"
         service_map["proposal_drafting"]="drafting"
@@ -53,31 +49,8 @@ phases:
 
   post_build:
     commands:
-      - echo "--- Deploying Lambda Layers via S3 ---"
-      - |
-        declare -A layer_arns
-        LAYERS_S3_BUCKET="blackbox-$TF_WORKSPACE-lambda-layers"
-        for layer in common google openai; do
-          TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
-          S3_KEY="layer-zips/${layer}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
-          ZIP_FILE="build/layer-${layer}.zip"
-          
-          echo "Uploading layer $layer to s3://$LAYERS_S3_BUCKET/$S3_KEY"
-          aws s3 cp "$ZIP_FILE" "s3://$LAYERS_S3_BUCKET/$S3_KEY"
+      # REMOVED: The entire "Deploying Lambda Layers via S3" block is gone.
 
-          echo "Publishing new version for layer: $TF_LAYER_NAME from S3"
-          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" \
-            --description "Auto-deployed by CodePipeline" \
-            --content "S3Bucket=$LAYERS_S3_BUCKET,S3Key=$S3_KEY" \
-            --query 'LayerVersionArn' --output text)
-          
-          if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
-            echo "ERROR: Failed to publish layer $layer. Halting deployment."
-            exit 1
-          fi
-          echo "  Published $layer as $NEW_LAYER_VERSION_ARN"
-          layer_arns[$layer]=$NEW_LAYER_VERSION_ARN
-        done
       - echo "--- Discovering Lambda Functions via Tags ---"
       - |
         FUNCTION_LIST_JSON=$(aws resourcegroupstaggingapi get-resources --resource-type-filters "lambda:function" --tag-filters "Key=Project,Values=blackbox" "Key=Environment,Values=$TF_WORKSPACE")
@@ -86,31 +59,27 @@ phases:
           exit 1
         fi
         echo "  Successfully discovered functions to update."
-      - echo "--- Uploading and Deploying Functions ---"
+      - echo "--- Uploading and Deploying Function Code ---"
       - |
-        declare -A service_layers
-        service_layers["sourcing"]="${layer_arns[common]}"
-        service_layers["drafting"]="${layer_arns[common]},${layer_arns[google]},${layer_arns[openai]}"
-        service_layers["costing"]="${layer_arns[common]},${layer_arns[google]},${layer_arns[openai]}"
+        # REMOVED: The service_layers map and logic for attaching layers is gone.
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
         for zip_file in build/functions/*.zip; do
             zip_name=$(basename "$zip_file" .zip)
             s3_key="lambda-code/${zip_name}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
             FUNCTION_ARN=$(echo $FUNCTION_LIST_JSON | jq -r --arg name "$zip_name" '.ResourceTagMappingList[] | select(.ResourceARN | endswith($name)) | .ResourceARN')
+
             if [ -z "$FUNCTION_ARN" ]; then
               echo "WARNING: Could not find a deployed Lambda for $zip_name. Skipping."
               continue
             fi
+
             echo "Uploading $zip_file to s3://$S3_ARTIFACT_BUCKET/$s3_key"
             aws s3 cp "$zip_file" "s3://$S3_ARTIFACT_BUCKET/$s3_key"
+
             echo "Updating code for function: $FUNCTION_ARN"
-            aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" > /dev/null
-            service_name=$(echo $zip_name | cut -d'-' -f1)
-            LAYERS_TO_ATTACH=${service_layers[$service_name]}
-            if [ -n "$LAYERS_TO_ATTACH" ]; then
-                echo "Attaching layers to $FUNCTION_ARN"
-                aws lambda wait function-updated --function-name "$FUNCTION_ARN"
-                aws lambda update-function-configuration --function-name "$FUNCTION_ARN" --layers $LAYERS_TO_ATTACH > /dev/null
-            fi
+            # The only deployment command left is update-function-code.
+            # We no longer run update-function-configuration from the pipeline.
+            aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" --publish > /dev/null
+
         done
       - echo "--- Deployment Complete ---"
