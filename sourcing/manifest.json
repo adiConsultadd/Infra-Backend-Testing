@@ -1,0 +1,5 @@
+{
+  "blackbox_sourcing_lambda_rfp_details_db_ingestion.py": "sourcing-rfp-details-db-ingestion",
+  "blackbox_sourcing_lambda_rfp_documents_s3_url_db_ingestion.py": "sourcing-rfp-documents-s3-url-db-ingestion",
+  "blackbox_sourcing_lambda_rfp_sourcing_web.py": "sourcing-rfp-sourcing-web"
+}

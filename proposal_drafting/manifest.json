@@ -1,0 +1,13 @@
+{
+  "blackbox_company_data_lambda.py": "drafting-company-data",
+  "blackbox_content_regeneration_lambda.py": "drafting-content-regeneration",
+  "blackbox_executive_summary_lambda.py": "drafting-executive-summary",
+  "blackbox_extract_text_from_file.py": "drafting-extract-text",
+  "blackbox_section_content_lambda.py": "drafting-section-content",
+  "blackbox_summary_lambda.py": "drafting-summary",
+  "blackbox_system_summary_lambda.py": "drafting-system-summary",
+  "blackbox_table_of_content_lambda.py": "drafting-table-of-content",
+  "blackbox_toc_enrichment_lambda.py": "drafting-toc-enrichment",
+  "blackbox_user_preference_lambda.py": "drafting-user-preference",
+  "blackbpx_toc_regenerate_lambda.py": "drafting-toc-regenerate"
+}

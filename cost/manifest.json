@@ -1,0 +1,10 @@
+{
+  "blackbox_hourly_wages_lambda.py": "costing-hourly-wages",
+  "blackbox_hourly_wages_result_lambda.py": "costing-hourly-wages-result",
+  "blackbox_rfp_cost_formating_lambda.py": "costing-rfp-cost-formating",
+  "blackbox_rfp_cost_image_calculation_lambda.py": "costing-rfp-cost-image-calculation",
+  "blackbox_rfp_cost_image_extractor_lambda.py": "costing-rfp-cost-image-extractor",
+  "blackbox_rfp_cost_regenerating_lambda.py": "costing-rfp-cost-regenerating",
+  "blackbox_rfp_infrastructure_lambda.py": "costing-rfp-infrastructure",
+  "blackbox_rfp_license_lambda.py": "costing-rfp-license"
+}

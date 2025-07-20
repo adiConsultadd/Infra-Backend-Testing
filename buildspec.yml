@@ -10,47 +10,44 @@ phases:
 
   build:
     commands:
-      # REMOVED: The section for packaging Lambda Layers has been completely removed.
-      # Terraform is now responsible for building and publishing layers.
-
-      - echo "--- Packaging Lambda Functions ---"
+      - echo "--- Packaging Lambda Functions using manifests ---"
       - |
-        # This logic remains the same, as its job is to package your Python code.
-        declare -A service_map
-        service_map["sourcing"]="sourcing"
-        service_map["proposal_drafting"]="drafting"
-        service_map["cost"]="costing"
-        for service_dir in "${!service_map[@]}"; do
-          tf_service_name=${service_map[$service_dir]}
+        SERVICE_DIRS=("cost" "proposal_drafting" "sourcing")
+        for service_dir in "${SERVICE_DIRS[@]}"; do
           echo "Packaging service: $service_dir"
+          MANIFEST_FILE="$service_dir/manifest.json"
+          if [ ! -f "$MANIFEST_FILE" ]; then
+            echo "WARNING: Manifest file not found for $service_dir. Skipping."
+            continue
+          fi
+          
+          # Find all shared python files in the service's root directory
           shared_files=$(find "$service_dir" -maxdepth 1 -type f -name "*.py")
-          for lambda_file in $service_dir/lambda/*.py; do
-            if [[ -f "$lambda_file" && ! "$lambda_file" == *"__init__.py"* ]]; then
-              base_name=$(basename "$lambda_file" .py)
-              key_part=$(echo "$base_name" | sed 's/blackbox_//' | sed 's/_lambda//' | sed 's/blackbpx/blackbox/' | sed 's/_/-/g')
-              if [[ "$tf_service_name" == "sourcing" ]]; then
-                function_suffix=$(echo "$key_part" | sed 's/sourcing-//')
-                function_suffix="sourcing-$function_suffix"
-              else
-                function_suffix="$tf_service_name-$key_part"
-              fi
-              echo "  Preparing package for: $function_suffix"
-              temp_package_dir="build/functions/pkg_${function_suffix}"
-              mkdir -p "$temp_package_dir"
-              cp "$lambda_file" "$temp_package_dir/index.py"
-              if [ -n "$shared_files" ]; then
-                cp $shared_files "$temp_package_dir/"
-              fi
-              (cd "$temp_package_dir" && zip -rq "../${function_suffix}.zip" .)
-              rm -rf "$temp_package_dir"
+
+          # Iterate through the manifest to package each function
+          for py_file in $(jq -r 'keys[]' "$MANIFEST_FILE"); do
+            function_suffix=$(jq -r --arg key "$py_file" '.[$key]' "$MANIFEST_FILE")
+            echo "  Preparing package for: $function_suffix"
+            
+            temp_package_dir="build/functions/pkg_${function_suffix}"
+            mkdir -p "$temp_package_dir"
+
+            # Copy the main handler file
+            cp "$service_dir/lambda/$py_file" "$temp_package_dir/index.py"
+            
+            # Copy all shared utility files
+            if [ -n "$shared_files" ]; then
+              cp $shared_files "$temp_package_dir/"
             fi
+            
+            # Create the zip file
+            (cd "$temp_package_dir" && zip -rq "../../${function_suffix}.zip" .)
+            rm -rf "$temp_package_dir"
           done
         done
 
   post_build:
     commands:
-      # REMOVED: The entire "Deploying Lambda Layers via S3" block is gone.
-
       - echo "--- Discovering Lambda Functions via Tags ---"
       - |
         FUNCTION_LIST_JSON=$(aws resourcegroupstaggingapi get-resources --resource-type-filters "lambda:function" --tag-filters "Key=Project,Values=blackbox" "Key=Environment,Values=$TF_WORKSPACE")
@@ -61,7 +58,6 @@ phases:
         echo "  Successfully discovered functions to update."
       - echo "--- Uploading and Deploying Function Code ---"
       - |
-        # REMOVED: The service_layers map and logic for attaching layers is gone.
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
         for zip_file in build/functions/*.zip; do
             zip_name=$(basename "$zip_file" .zip)
@@ -77,9 +73,6 @@ phases:
             aws s3 cp "$zip_file" "s3://$S3_ARTIFACT_BUCKET/$s3_key"
 
             echo "Updating code for function: $FUNCTION_ARN"
-            # The only deployment command left is update-function-code.
-            # We no longer run update-function-configuration from the pipeline.
             aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" --publish > /dev/null
-
         done
       - echo "--- Deployment Complete ---"
