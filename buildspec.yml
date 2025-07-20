@@ -21,10 +21,8 @@ phases:
             continue
           fi
           
-          # Find all shared python files in the service's root directory
           shared_files=$(find "$service_dir" -maxdepth 1 -type f -name "*.py")
 
-          # Iterate through the manifest to package each function
           for py_file in $(jq -r 'keys[]' "$MANIFEST_FILE"); do
             function_suffix=$(jq -r --arg key "$py_file" '.[$key]' "$MANIFEST_FILE")
             echo "  Preparing package for: $function_suffix"
@@ -32,16 +30,15 @@ phases:
             temp_package_dir="build/functions/pkg_${function_suffix}"
             mkdir -p "$temp_package_dir"
 
-            # Copy the main handler file
             cp "$service_dir/lambda/$py_file" "$temp_package_dir/index.py"
             
-            # Copy all shared utility files
             if [ -n "$shared_files" ]; then
               cp $shared_files "$temp_package_dir/"
             fi
             
-            # Create the zip file
-            (cd "$temp_package_dir" && zip -rq "../../${function_suffix}.zip" .)
+            # --- THIS IS THE ONLY LINE THAT CHANGED ---
+            # Changed from ../../ to ../ to place the zip in the correct /functions folder
+            (cd "$temp_package_dir" && zip -rq "../${function_suffix}.zip" .)
             rm -rf "$temp_package_dir"
           done
         done
