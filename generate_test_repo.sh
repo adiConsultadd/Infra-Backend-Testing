@@ -1,20 +1,152 @@
-#!/bin/bash
+# FILE: adiconsultadd-infra-backend-testing/buildspec.yml
 
-# This script creates the standard directory structure for Lambda Layers.
+version: 0.2
 
-echo "Creating layer directories: common, google, openai..."
+phases:
+  install:
+    runtime-versions:
+      python: 3.9
+    commands:
+      - echo "Installing build dependencies..."
+      - yum install -y jq zip
 
-# The '-p' flag tells mkdir to create parent directories as needed
-# and prevents errors if the directories already exist.
-mkdir -p layers/common
-mkdir -p layers/google
-mkdir -p layers/openai
+  build:
+    commands:
+      # --- Stage 1: Package all Lambda Layers ---
+      - echo "--- Packaging Lambda Layers ---"
+      - mkdir -p build/layers
+      - |
+        for layer in $(ls layers); do
+          echo "  Packaging layer: $layer"
+          mkdir -p "build/layers/$layer/python"
+          pip install -r "layers/$layer/requirements.txt" -t "build/layers/$layer/python"
+          (cd "build/layers/$layer" && zip -rq "../../layer-$layer.zip" .)
+        done
+      - echo "Layer packaging complete."
 
-echo "Creating requirements.txt files..."
+      # --- Stage 2: Package all Lambda Functions ---
+      - echo "--- Packaging Lambda Functions ---"
+      - mkdir -p build/functions
+      - |
+        SERVICE_DIRS=("cost" "proposal_drafting" "sourcing")
+        for service_dir in "${SERVICE_DIRS[@]}"; do
+          echo "  Packaging service: $service_dir"
+          MANIFEST_FILE="$service_dir/manifest.json"
+          shared_files=$(find "$service_dir" -maxdepth 1 -type f -name "*.py")
 
-# Use 'echo' with redirection '>' to create each file with placeholder content.
-echo "# Add common dependencies like redis, psycopg2-binary here." > layers/common/requirements.txt
-echo "# Add Google-specific dependencies like langchain-google-genai here." > layers/google/requirements.txt
-echo "# Add OpenAI-specific dependencies like openai, langchain-community here." > layers/openai/requirements.txt
+          for py_file in $(jq -r 'keys[]' "$MANIFEST_FILE"); do
+            function_suffix=$(jq -r --arg key "$py_file" '.[$key]' "$MANIFEST_FILE")
+            echo "    Preparing package for: $function_suffix"
+            
+            temp_package_dir="build/functions/pkg_${function_suffix}"
+            mkdir -p "$temp_package_dir"
 
-echo "✅ Layer structure created successfully!"
+            cp "$service_dir/lambda/$py_file" "$temp_package_dir/index.py"
+            if [ -n "$shared_files" ]; then cp $shared_files "$temp_package_dir/"; fi
+            
+            (cd "$temp_package_dir" && zip -rq "../${function_suffix}.zip" .)
+            rm -rf "$temp_package_dir"
+          done
+        done
+      - echo "Function packaging complete."
+
+  post_build:
+    commands:
+      # --- Stage 3: Deploy Layers by Uploading to S3 First ---
+      - echo "--- Deploying Lambda Layers ---"
+      - |
+        declare -A layer_arns
+        # The S3 bucket created by your Terraform IaC for storing layer assets.
+        S3_LAYER_BUCKET="blackbox-$TF_WORKSPACE-lambda-layers"
+
+        for layer in $(ls layers); do
+          TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
+          LAYER_ZIP_FILE="build/layer-$layer.zip"
+          S3_KEY="layer-source/${layer}-${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
+          
+          echo "  Publishing new version for layer: $TF_LAYER_NAME"
+          
+          # 1. Upload the large zip file to S3 first.
+          echo "    Uploading $LAYER_ZIP_FILE to s3://$S3_LAYER_BUCKET/$S3_KEY"
+          aws s3 cp "$LAYER_ZIP_FILE" "s3://$S3_LAYER_BUCKET/$S3_KEY"
+
+          # 2. Publish the layer version by pointing to the S3 object.
+          echo "    Publishing from S3 object..."
+          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version \
+            --layer-name "$TF_LAYER_NAME" \
+            --description "Auto-deployed by CodePipeline on $(date)" \
+            --content "S3Bucket=$S3_LAYER_BUCKET,S3Key=$S3_KEY" \
+            --query 'LayerVersionArn' --output text)
+          
+          if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
+            echo "ERROR: Failed to publish layer $layer. Halting."
+            exit 1
+          fi
+          echo "    Published new version: $NEW_LAYER_VERSION_ARN"
+          layer_arns[$layer]=$NEW_LAYER_VERSION_ARN
+        done
+
+      # --- Stage 4: Discover Lambda Functions via Tags ---
+      - echo "--- Discovering Lambda Functions ---"
+      - |
+        FUNCTION_LIST_JSON=$(aws resourcegroupstaggingapi get-resources --resource-type-filters "lambda:function" --tag-filters "Key=Project,Values=blackbox" "Key=Environment,Values=$TF_WORKSPACE")
+        if [ -z "$FUNCTION_LIST_JSON" ]; then
+          echo "ERROR: No Lambda functions found with the specified tags. Exiting."
+          exit 1
+        fi
+        echo "  Successfully discovered functions to update."
+
+      # --- Stage 5: Upload and Deploy Function Code AND Attach Layers ---
+      - echo "--- Uploading Artifacts and Updating Functions ---"
+      - |
+        declare -A function_layers
+        
+        function_layers["costing-hourly-wages"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-hourly-wages-result"]="${layer_arns[common]}"
+        function_layers["costing-rfp-cost-formating"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-cost-image-calculation"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-rfp-cost-image-extractor"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-rfp-cost-regenerating"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-infrastructure"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-license"]="${layer_arns[common]},${layer_arns[openai]}"
+        
+        function_layers["drafting-rfp-cost-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-company-data"]="${layer_arns[common]}"
+        function_layers["drafting-content-regeneration"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-executive-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-extract-text"]="${layer_arns[common]}"
+        function_layers["drafting-section-content"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-system-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-table-of-content"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-toc-enrichment"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-user-preference"]="${layer_arns[common]}"
+        function_layers["drafting-toc-regenerate"]="${layer_arns[common]},${layer_arns[google]}"
+
+        S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
+        
+        for zip_file in build/functions/*.zip; do
+            zip_name=$(basename "$zip_file" .zip)
+            s3_key="lambda-code/${zip_name}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
+            FUNCTION_ARN=$(echo $FUNCTION_LIST_JSON | jq -r --arg name "$zip_name" '.ResourceTagMappingList[] | select(.ResourceARN | endswith($name)) | .ResourceARN')
+
+            if [ -z "$FUNCTION_ARN" ]; then
+              echo "WARNING: Could not find a deployed Lambda for $zip_name. Skipping."
+              continue
+            fi
+
+            echo "  Deploying to $FUNCTION_ARN"
+            echo "    Uploading $zip_file to s3://$S3_ARTIFACT_BUCKET/$s3_key"
+            aws s3 cp "$zip_file" "s3://$S3_ARTIFACT_BUCKET/$s3_key"
+
+            echo "    Updating function code..."
+            aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" --publish > /dev/null
+            aws lambda wait function-updated --function-name "$FUNCTION_ARN"
+            
+            LAYERS_TO_ATTACH=${function_layers[$zip_name]}
+            if [ -n "$LAYERS_TO_ATTACH" ]; then
+                echo "    Attaching new layer versions..."
+                aws lambda update-function-configuration --function-name "$FUNCTION_ARN" --layers $LAYERS_TO_ATTACH > /dev/null
+            fi
+        done
+      - echo "--- Deployment Complete ---"

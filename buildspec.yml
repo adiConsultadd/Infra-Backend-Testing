@@ -26,7 +26,6 @@ phases:
       - echo "--- Packaging Lambda Functions ---"
       - mkdir -p build/functions
       - |
-        # Use manifest files to map python filenames to terraform function names
         SERVICE_DIRS=("cost" "proposal_drafting" "sourcing")
         for service_dir in "${SERVICE_DIRS[@]}"; do
           echo "  Packaging service: $service_dir"
@@ -51,15 +50,31 @@ phases:
 
   post_build:
     commands:
-      # --- Stage 3: Deploy Layers and Capture New ARNs ---
+      # --- Stage 3: Deploy Layers by Uploading to S3 First ---
       - echo "--- Deploying Lambda Layers ---"
       - |
         declare -A layer_arns
+        # The S3 bucket created by your Terraform IaC for storing layer assets.
+        S3_LAYER_BUCKET="blackbox-$TF_WORKSPACE-lambda-layers"
+
         for layer in $(ls layers); do
           TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
+          LAYER_ZIP_FILE="build/layer-$layer.zip"
+          S3_KEY="layer-source/${layer}-${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
+          
           echo "  Publishing new version for layer: $TF_LAYER_NAME"
           
-          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" --description "Auto-deployed by CodePipeline on $(date)" --zip-file "fileb://build/layer-$layer.zip" --query 'LayerVersionArn' --output text)
+          # 1. Upload the large zip file to S3 first.
+          echo "    Uploading $LAYER_ZIP_FILE to s3://$S3_LAYER_BUCKET/$S3_KEY"
+          aws s3 cp "$LAYER_ZIP_FILE" "s3://$S3_LAYER_BUCKET/$S3_KEY"
+
+          # 2. Publish the layer version by pointing to the S3 object.
+          echo "    Publishing from S3 object..."
+          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version \
+            --layer-name "$TF_LAYER_NAME" \
+            --description "Auto-deployed by CodePipeline on $(date)" \
+            --content "S3Bucket=$S3_LAYER_BUCKET,S3Key=$S3_KEY" \
+            --query 'LayerVersionArn' --output text)
           
           if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
             echo "ERROR: Failed to publish layer $layer. Halting."
@@ -82,14 +97,8 @@ phases:
       # --- Stage 5: Upload and Deploy Function Code AND Attach Layers ---
       - echo "--- Uploading Artifacts and Updating Functions ---"
       - |
-        # ======================= MAPPING LOGIC =======================
-        # This map defines which function gets which layers.
-        # It is the source of truth for your application's dependencies.
-        # The keys must match the function names from your manifest.json files.
-        # =============================================================
         declare -A function_layers
         
-        # Costing Service Layers
         function_layers["costing-hourly-wages"]="${layer_arns[common]},${layer_arns[google]}"
         function_layers["costing-hourly-wages-result"]="${layer_arns[common]}"
         function_layers["costing-rfp-cost-formating"]="${layer_arns[common]},${layer_arns[openai]}"
@@ -99,7 +108,6 @@ phases:
         function_layers["costing-rfp-infrastructure"]="${layer_arns[common]},${layer_arns[openai]}"
         function_layers["costing-rfp-license"]="${layer_arns[common]},${layer_arns[openai]}"
         
-        # Drafting Service Layers
         function_layers["drafting-rfp-cost-summary"]="${layer_arns[common]},${layer_arns[openai]}"
         function_layers["drafting-company-data"]="${layer_arns[common]}"
         function_layers["drafting-content-regeneration"]="${layer_arns[common]},${layer_arns[google]}"
@@ -112,9 +120,6 @@ phases:
         function_layers["drafting-toc-enrichment"]="${layer_arns[common]},${layer_arns[google]}"
         function_layers["drafting-user-preference"]="${layer_arns[common]}"
         function_layers["drafting-toc-regenerate"]="${layer_arns[common]},${layer_arns[google]}"
-
-        # Sourcing Service Layers (has no layers based on your IaC)
-        # function_layers["sourcing-rfp-sourcing-web"]="" # Example if needed
 
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
         
@@ -136,7 +141,6 @@ phases:
             aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" --publish > /dev/null
             aws lambda wait function-updated --function-name "$FUNCTION_ARN"
             
-            # Use the map to find and attach the correct new layer versions
             LAYERS_TO_ATTACH=${function_layers[$zip_name]}
             if [ -n "$LAYERS_TO_ATTACH" ]; then
                 echo "    Attaching new layer versions..."
