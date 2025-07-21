@@ -1,3 +1,5 @@
+# FILE: adiconsultadd-infra-backend-testing/buildspec.yml
+
 version: 0.2
 
 phases:
@@ -54,7 +56,6 @@ phases:
       - echo "--- Deploying Lambda Layers ---"
       - |
         declare -A layer_arns
-        # The S3 bucket created by your Terraform IaC for storing layer assets.
         S3_LAYER_BUCKET="blackbox-$TF_WORKSPACE-lambda-layers"
 
         for layer in $(ls layers); do
@@ -64,11 +65,9 @@ phases:
           
           echo "  Publishing new version for layer: $TF_LAYER_NAME"
           
-          # 1. Upload the large zip file to S3 first.
           echo "    Uploading $LAYER_ZIP_FILE to s3://$S3_LAYER_BUCKET/$S3_KEY"
           aws s3 cp "$LAYER_ZIP_FILE" "s3://$S3_LAYER_BUCKET/$S3_KEY"
 
-          # 2. Publish the layer version by pointing to the S3 object.
           echo "    Publishing from S3 object..."
           NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version \
             --layer-name "$TF_LAYER_NAME" \
@@ -99,27 +98,28 @@ phases:
       - |
         declare -A function_layers
         
-        function_layers["costing-hourly-wages"]="${layer_arns[common]},${layer_arns[google]}"
+        # --- CORRECTED MAPPING: Using spaces instead of commas ---
+        function_layers["costing-hourly-wages"]="${layer_arns[common]} ${layer_arns[google]}"
         function_layers["costing-hourly-wages-result"]="${layer_arns[common]}"
-        function_layers["costing-rfp-cost-formating"]="${layer_arns[common]},${layer_arns[openai]}"
-        function_layers["costing-rfp-cost-image-calculation"]="${layer_arns[common]},${layer_arns[google]}"
-        function_layers["costing-rfp-cost-image-extractor"]="${layer_arns[common]},${layer_arns[google]}"
-        function_layers["costing-rfp-cost-regenerating"]="${layer_arns[common]},${layer_arns[openai]}"
-        function_layers["costing-rfp-infrastructure"]="${layer_arns[common]},${layer_arns[openai]}"
-        function_layers["costing-rfp-license"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-cost-formating"]="${layer_arns[common]} ${layer_arns[openai]}"
+        function_layers["costing-rfp-cost-image-calculation"]="${layer_arns[common]} ${layer_arns[google]}"
+        function_layers["costing-rfp-cost-image-extractor"]="${layer_arns[common]} ${layer_arns[google]}"
+        function_layers["costing-rfp-cost-regenerating"]="${layer_arns[common]} ${layer_arns[openai]}"
+        function_layers["costing-rfp-infrastructure"]="${layer_arns[common]} ${layer_arns[openai]}"
+        function_layers["costing-rfp-license"]="${layer_arns[common]} ${layer_arns[openai]}"
         
-        function_layers["drafting-rfp-cost-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-rfp-cost-summary"]="${layer_arns[common]} ${layer_arns[openai]}"
         function_layers["drafting-company-data"]="${layer_arns[common]}"
-        function_layers["drafting-content-regeneration"]="${layer_arns[common]},${layer_arns[google]}"
-        function_layers["drafting-executive-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-content-regeneration"]="${layer_arns[common]} ${layer_arns[google]}"
+        function_layers["drafting-executive-summary"]="${layer_arns[common]} ${layer_arns[openai]}"
         function_layers["drafting-extract-text"]="${layer_arns[common]}"
-        function_layers["drafting-section-content"]="${layer_arns[common]},${layer_arns[google]}"
-        function_layers["drafting-summary"]="${layer_arns[common]},${layer_arns[openai]}"
-        function_layers["drafting-system-summary"]="${layer_arns[common]},${layer_arns[openai]}"
-        function_layers["drafting-table-of-content"]="${layer_arns[common]},${layer_arns[google]}"
-        function_layers["drafting-toc-enrichment"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-section-content"]="${layer_arns[common]} ${layer_arns[google]}"
+        function_layers["drafting-summary"]="${layer_arns[common]} ${layer_arns[openai]}"
+        function_layers["drafting-system-summary"]="${layer_arns[common]} ${layer_arns[openai]}"
+        function_layers["drafting-table-of-content"]="${layer_arns[common]} ${layer_arns[google]}"
+        function_layers["drafting-toc-enrichment"]="${layer_arns[common]} ${layer_arns[google]}"
         function_layers["drafting-user-preference"]="${layer_arns[common]}"
-        function_layers["drafting-toc-regenerate"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-toc-regenerate"]="${layer_arns[common]} ${layer_arns[google]}"
 
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
         
