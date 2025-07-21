@@ -10,42 +10,67 @@ phases:
 
   build:
     commands:
-      - echo "--- Packaging Lambda Functions using manifests ---"
+      # --- Stage 1: Package all Lambda Layers ---
+      - echo "--- Packaging Lambda Layers ---"
+      - mkdir -p build/layers
       - |
+        for layer in $(ls layers); do
+          echo "  Packaging layer: $layer"
+          mkdir -p "build/layers/$layer/python"
+          pip install -r "layers/$layer/requirements.txt" -t "build/layers/$layer/python"
+          (cd "build/layers/$layer" && zip -rq "../../layer-$layer.zip" .)
+        done
+      - echo "Layer packaging complete."
+
+      # --- Stage 2: Package all Lambda Functions ---
+      - echo "--- Packaging Lambda Functions ---"
+      - mkdir -p build/functions
+      - |
+        # Use manifest files to map python filenames to terraform function names
         SERVICE_DIRS=("cost" "proposal_drafting" "sourcing")
         for service_dir in "${SERVICE_DIRS[@]}"; do
-          echo "Packaging service: $service_dir"
+          echo "  Packaging service: $service_dir"
           MANIFEST_FILE="$service_dir/manifest.json"
-          if [ ! -f "$MANIFEST_FILE" ]; then
-            echo "WARNING: Manifest file not found for $service_dir. Skipping."
-            continue
-          fi
-          
           shared_files=$(find "$service_dir" -maxdepth 1 -type f -name "*.py")
 
           for py_file in $(jq -r 'keys[]' "$MANIFEST_FILE"); do
             function_suffix=$(jq -r --arg key "$py_file" '.[$key]' "$MANIFEST_FILE")
-            echo "  Preparing package for: $function_suffix"
+            echo "    Preparing package for: $function_suffix"
             
             temp_package_dir="build/functions/pkg_${function_suffix}"
             mkdir -p "$temp_package_dir"
 
             cp "$service_dir/lambda/$py_file" "$temp_package_dir/index.py"
+            if [ -n "$shared_files" ]; then cp $shared_files "$temp_package_dir/"; fi
             
-            if [ -n "$shared_files" ]; then
-              cp $shared_files "$temp_package_dir/"
-            fi
-            
-            # --- THIS IS THE ONLY LINE THAT CHANGED ---
-            # Changed from ../../ to ../ to place the zip in the correct /functions folder
             (cd "$temp_package_dir" && zip -rq "../${function_suffix}.zip" .)
             rm -rf "$temp_package_dir"
           done
         done
+      - echo "Function packaging complete."
 
   post_build:
     commands:
-      - echo "--- Discovering Lambda Functions via Tags ---"
+      # --- Stage 3: Deploy Layers and Capture New ARNs ---
+      - echo "--- Deploying Lambda Layers ---"
+      - |
+        declare -A layer_arns
+        for layer in $(ls layers); do
+          TF_LAYER_NAME="blackbox-$TF_WORKSPACE-$layer"
+          echo "  Publishing new version for layer: $TF_LAYER_NAME"
+          
+          NEW_LAYER_VERSION_ARN=$(aws lambda publish-layer-version --layer-name "$TF_LAYER_NAME" --description "Auto-deployed by CodePipeline on $(date)" --zip-file "fileb://build/layer-$layer.zip" --query 'LayerVersionArn' --output text)
+          
+          if [ -z "$NEW_LAYER_VERSION_ARN" ]; then
+            echo "ERROR: Failed to publish layer $layer. Halting."
+            exit 1
+          fi
+          echo "    Published new version: $NEW_LAYER_VERSION_ARN"
+          layer_arns[$layer]=$NEW_LAYER_VERSION_ARN
+        done
+
+      # --- Stage 4: Discover Lambda Functions via Tags ---
+      - echo "--- Discovering Lambda Functions ---"
       - |
         FUNCTION_LIST_JSON=$(aws resourcegroupstaggingapi get-resources --resource-type-filters "lambda:function" --tag-filters "Key=Project,Values=blackbox" "Key=Environment,Values=$TF_WORKSPACE")
         if [ -z "$FUNCTION_LIST_JSON" ]; then
@@ -53,9 +78,46 @@ phases:
           exit 1
         fi
         echo "  Successfully discovered functions to update."
-      - echo "--- Uploading and Deploying Function Code ---"
+
+      # --- Stage 5: Upload and Deploy Function Code AND Attach Layers ---
+      - echo "--- Uploading Artifacts and Updating Functions ---"
       - |
+        # ======================= MAPPING LOGIC =======================
+        # This map defines which function gets which layers.
+        # It is the source of truth for your application's dependencies.
+        # The keys must match the function names from your manifest.json files.
+        # =============================================================
+        declare -A function_layers
+        
+        # Costing Service Layers
+        function_layers["costing-hourly-wages"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-hourly-wages-result"]="${layer_arns[common]}"
+        function_layers["costing-rfp-cost-formating"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-cost-image-calculation"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-rfp-cost-image-extractor"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["costing-rfp-cost-regenerating"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-infrastructure"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["costing-rfp-license"]="${layer_arns[common]},${layer_arns[openai]}"
+        
+        # Drafting Service Layers
+        function_layers["drafting-rfp-cost-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-company-data"]="${layer_arns[common]}"
+        function_layers["drafting-content-regeneration"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-executive-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-extract-text"]="${layer_arns[common]}"
+        function_layers["drafting-section-content"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-system-summary"]="${layer_arns[common]},${layer_arns[openai]}"
+        function_layers["drafting-table-of-content"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-toc-enrichment"]="${layer_arns[common]},${layer_arns[google]}"
+        function_layers["drafting-user-preference"]="${layer_arns[common]}"
+        function_layers["drafting-toc-regenerate"]="${layer_arns[common]},${layer_arns[google]}"
+
+        # Sourcing Service Layers (has no layers based on your IaC)
+        # function_layers["sourcing-rfp-sourcing-web"]="" # Example if needed
+
         S3_ARTIFACT_BUCKET="blackbox-$TF_WORKSPACE-lambda-artifacts"
+        
         for zip_file in build/functions/*.zip; do
             zip_name=$(basename "$zip_file" .zip)
             s3_key="lambda-code/${zip_name}/${CODEBUILD_RESOLVED_SOURCE_VERSION}.zip"
@@ -66,10 +128,19 @@ phases:
               continue
             fi
 
-            echo "Uploading $zip_file to s3://$S3_ARTIFACT_BUCKET/$s3_key"
+            echo "  Deploying to $FUNCTION_ARN"
+            echo "    Uploading $zip_file to s3://$S3_ARTIFACT_BUCKET/$s3_key"
             aws s3 cp "$zip_file" "s3://$S3_ARTIFACT_BUCKET/$s3_key"
 
-            echo "Updating code for function: $FUNCTION_ARN"
+            echo "    Updating function code..."
             aws lambda update-function-code --function-name "$FUNCTION_ARN" --s3-bucket "$S3_ARTIFACT_BUCKET" --s3-key "$s3_key" --publish > /dev/null
+            aws lambda wait function-updated --function-name "$FUNCTION_ARN"
+            
+            # Use the map to find and attach the correct new layer versions
+            LAYERS_TO_ATTACH=${function_layers[$zip_name]}
+            if [ -n "$LAYERS_TO_ATTACH" ]; then
+                echo "    Attaching new layer versions..."
+                aws lambda update-function-configuration --function-name "$FUNCTION_ARN" --layers $LAYERS_TO_ATTACH > /dev/null
+            fi
         done
       - echo "--- Deployment Complete ---"
