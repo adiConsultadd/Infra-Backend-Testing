@@ -1,5 +1,3 @@
-# FILE: adiconsultadd-infra-backend-testing/buildspec.yml
-
 version: 0.2
 
 phases:
